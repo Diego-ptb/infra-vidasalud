@@ -15,7 +15,9 @@ services:
     environment:
       AZURE_TENANT_ID: ${AZURE_TENANT_ID}
       AZURE_API_CLIENT_ID: ${AZURE_API_CLIENT_ID}
+      # Uno o varios origenes separados por coma.
       FRONTEND_ORIGIN: ${FRONTEND_ORIGIN}
+      FRONTEND_ORIGINS: ${FRONTEND_ORIGINS:-}
       INTERNAL_KEY: ${INTERNAL_KEY}
       MS_APPOINTMENTS_URL: http://appointments:8081
       MS_CATALOG_URL: http://catalog:8082
