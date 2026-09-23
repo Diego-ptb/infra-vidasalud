@@ -1,0 +1,60 @@
+# EC2 "ec2-apps": BFF + microservicios de dominio.
+#
+# Uso:   docker compose up -d --build
+#
+# Los repositorios de codigo se clonan aparte. REPOS_PATH indica donde estan:
+#   - en tu PC, son hermanos de infra/   -> no hace falta definirlo
+#   - en la EC2, en /home/ec2-user       -> REPOS_PATH=/home/ec2-user en el .env
+services:
+
+  bff:
+    build: ${REPOS_PATH:-../..}/ms-vidasalud-bff
+    container_name: vidasalud-bff
+    ports:
+      - "8080:8080"
+    environment:
+      AZURE_TENANT_ID: ${AZURE_TENANT_ID}
+      AZURE_API_CLIENT_ID: ${AZURE_API_CLIENT_ID}
+      FRONTEND_ORIGIN: ${FRONTEND_ORIGIN}
+      INTERNAL_KEY: ${INTERNAL_KEY}
+      MS_APPOINTMENTS_URL: http://appointments:8081
+      MS_CATALOG_URL: http://catalog:8082
+      MS_REPORT_URL: http://appointments:8081
+      MS_AUDIT_URL: http://appointments:8081
+    depends_on:
+      - appointments
+      - catalog
+    restart: unless-stopped
+    networks: [vidasalud]
+
+  appointments:
+    build: ${REPOS_PATH:-../..}/ms-vidasalud-appointments
+    container_name: vidasalud-appointments
+    expose:
+      - "8081"
+    environment:
+      SPRING_PROFILES_ACTIVE: ${DB_PROFILE:-dev}
+      INTERNAL_KEY: ${INTERNAL_KEY}
+      DB_APPOINTMENTS_URL: ${DB_APPOINTMENTS_URL}
+      DB_APPOINTMENTS_USER: ${DB_APPOINTMENTS_USER}
+      DB_APPOINTMENTS_PASSWORD: ${DB_APPOINTMENTS_PASSWORD}
+    restart: unless-stopped
+    networks: [vidasalud]
+
+  catalog:
+    build: ${REPOS_PATH:-../..}/ms-vidasalud-catalog
+    container_name: vidasalud-catalog
+    expose:
+      - "8082"
+    environment:
+      SPRING_PROFILES_ACTIVE: ${DB_PROFILE:-dev}
+      INTERNAL_KEY: ${INTERNAL_KEY}
+      DB_CATALOG_URL: ${DB_CATALOG_URL}
+      DB_CATALOG_USER: ${DB_CATALOG_USER}
+      DB_CATALOG_PASSWORD: ${DB_CATALOG_PASSWORD}
+    restart: unless-stopped
+    networks: [vidasalud]
+
+networks:
+  vidasalud:
+    driver: bridge

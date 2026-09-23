@@ -1,0 +1,49 @@
+# EC2 "ec2-mq": cluster RabbitMQ de 2 nodos con Management UI.
+# Topologia del caso: 3 colas de trabajo + 3 DLQ (ver definitions.json).
+services:
+
+  rabbit1:
+    image: rabbitmq:3.13-management
+    container_name: rabbit1
+    hostname: rabbit1
+    environment:
+      RABBITMQ_ERLANG_COOKIE: ${ERLANG_COOKIE:-vidasalud-cookie}
+      RABBITMQ_DEFAULT_USER: ${RABBIT_USER:-admin}
+      RABBITMQ_DEFAULT_PASS: ${RABBIT_PASS:-admin}
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbit1-data:/var/lib/rabbitmq
+      - ./definitions.json:/etc/rabbitmq/definitions.json:ro
+      - ./rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+    networks: [mq]
+
+  rabbit2:
+    image: rabbitmq:3.13-management
+    container_name: rabbit2
+    hostname: rabbit2
+    environment:
+      RABBITMQ_ERLANG_COOKIE: ${ERLANG_COOKIE:-vidasalud-cookie}
+      RABBITMQ_DEFAULT_USER: ${RABBIT_USER:-admin}
+      RABBITMQ_DEFAULT_PASS: ${RABBIT_PASS:-admin}
+    ports:
+      - "5673:5672"
+      - "15673:15672"
+    volumes:
+      - rabbit2-data:/var/lib/rabbitmq
+    depends_on:
+      - rabbit1
+    networks: [mq]
+    # Para unir rabbit2 al cluster, tras levantar:
+    #   docker exec rabbit2 rabbitmqctl stop_app
+    #   docker exec rabbit2 rabbitmqctl join_cluster rabbit@rabbit1
+    #   docker exec rabbit2 rabbitmqctl start_app
+
+volumes:
+  rabbit1-data:
+  rabbit2-data:
+
+networks:
+  mq:
+    driver: bridge
