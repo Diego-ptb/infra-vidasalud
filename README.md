@@ -2,29 +2,32 @@
 
 Infraestructura como código del caso **VidaSalud** · DSY1107 Desarrollo Cloud Native I.
 
-No contiene código de aplicación: solo los archivos que describen cómo se despliega cada
-grupo de servicios. Sigue la sección 7 del caso, que pide un `compose.yml` por cada
-instancia EC2.
+No contiene código de aplicación: solo los archivos que describen cómo se despliega el
+sistema.
 
 ```
 infra/
-├─ apps/     → ec2-apps   · BFF + microservicios de dominio
-├─ mq/       → ec2-mq     · RabbitMQ en clúster
-└─ kafka/    → ec2-kafka  · Zookeeper + Kafka + Kafka UI
+├─ apps/     → compose del stack completo: RabbitMQ en clúster + BFF + microservicios
+├─ mq/       → configuración del broker (definiciones, política HA, script de clúster)
+└─ kafka/    → alternativa de mensajería, no usada en esta entrega
 ```
 
-## apps/ — el stack de aplicación
+## apps/ — el stack completo
 
-Levanta tres contenedores en una red privada de Docker:
+Un solo `docker compose up -d --build` levanta siete contenedores en una red privada:
 
-| Servicio | Puerto | Expuesto al exterior |
-|---|---|---|
-| `bff` | 8080 | **Sí**, es el único punto de entrada |
-| `appointments` | 8081 | No |
-| `catalog` | 8082 | No |
+| Servicio | Puerto | Expuesto al exterior | Rol |
+|---|---|---|---|
+| `rabbit1` | 5672 / 15672 | Solo para la demo | Nodo 1 del clúster |
+| `rabbit2` | 5673 / 15673 | Solo para la demo | Nodo 2 del clúster |
+| `bff` | 8080 | **Sí**, único punto de entrada | Valida el JWT y enruta |
+| `appointments` | 8081 | No | Atenciones + consumidor de `q.admision.ticket` |
+| `catalog` | 8082 | No | Prestaciones + consumidor de `q.catalogo.cupo` |
+| `notifications` | 8091 | No | Consumidor de `q.notificaciones.email` |
+| `rabbit-admin` | 8090 | No | API REST de administración del broker |
 
-Que appointments y catalog no publiquen puerto es intencional: obliga a que todo el
-tráfico pase por el BFF, que es quien valida el JWT. Además exigen la cabecera
+Que los microservicios no publiquen puerto es intencional: obliga a que todo el tráfico
+pase por el BFF, que es quien valida el JWT. Además exigen la cabecera
 `X-Internal-Key`, así que tampoco sirve alcanzarlos desde dentro de la red sin la clave.
 
 ### Uso
@@ -35,6 +38,8 @@ Los repositorios de código se clonan aparte:
 git clone https://github.com/Diego-ptb/ms-vidasalud-bff.git
 git clone https://github.com/Diego-ptb/ms-vidasalud-appointments.git
 git clone https://github.com/Diego-ptb/ms-vidasalud-catalog.git
+git clone https://github.com/Diego-ptb/ms-vidasalud-notifications.git
+git clone https://github.com/Diego-ptb/ms-vidasalud-rabbit-admin.git
 git clone https://github.com/Diego-ptb/infra-vidasalud.git
 ```
 
@@ -43,8 +48,9 @@ Luego:
 ```bash
 cd infra-vidasalud/apps
 cp .env.example .env
-nano .env                  # completa credenciales y REPOS_PATH
+nano .env                    # completa credenciales y REPOS_PATH
 docker compose up -d --build
+../mq/unir-cluster.sh        # una sola vez: une rabbit2 al clúster
 ```
 
 `REPOS_PATH` indica dónde están los repos de código:
@@ -54,6 +60,17 @@ docker compose up -d --build
 | Tu PC, con los repos hermanos de `infra/` | déjalo sin definir (usa `../..`) |
 | EC2, con los repos en el home | `REPOS_PATH=/home/ec2-user` |
 
+### Memoria
+
+Siete contenedores, cinco de ellos JVM, no caben en una `t2.micro` de 1 GB. Usa al
+menos **t3.small (2 GB)**; con 4 GB (`t3.medium`) va holgado. Si la instancia es
+pequeña, limita cada JVM añadiendo al servicio:
+
+```yaml
+    environment:
+      JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=50
+```
+
 ### Verificar
 
 ```bash
@@ -61,42 +78,35 @@ docker compose ps
 curl http://localhost:8080/actuator/health          # {"status":"UP"}
 curl -o /dev/null -w "%{http_code}\n" \
      http://localhost:8080/api/me                   # 401, sin token
+docker exec rabbit1 rabbitmqctl cluster_status      # dos nodos en Running Nodes
 ```
 
-## mq/ — RabbitMQ
+## mq/ — configuración del broker
 
-Clúster de 2 nodos con Management UI en el puerto 15672. `definitions.json` carga la
-topología del caso al arrancar: 3 colas de trabajo (`q.cmd.email`, `q.cmd.admission`,
-`q.cmd.record`), sus 3 DLQ, y los exchanges `cmd.direct`, `cmd.topic` y `cmd.dead.dlx`.
+Los nodos se definen en `apps/compose.yml`; esta carpeta tiene lo que montan:
 
-Para unir el segundo nodo al clúster, tras levantar:
+| Archivo | Para qué |
+|---|---|
+| `rabbitmq.conf` | Carga `definitions.json` al arrancar |
+| `definitions.json` | Usuario `admin`, permisos y la política de alta disponibilidad |
+| `unir-cluster.sh` | Une `rabbit2` al clúster de `rabbit1` |
+| `LEEME.md` | Topología de colas y cómo comprobar el clúster |
 
-```bash
-docker exec rabbit2 rabbitmqctl stop_app
-docker exec rabbit2 rabbitmqctl join_cluster rabbit@rabbit1
-docker exec rabbit2 rabbitmqctl start_app
-```
+Las colas, exchanges y bindings **no** están en `definitions.json`: los declaran los
+microservicios como beans de Spring AMQP. El detalle del por qué está en
+[`mq/LEEME.md`](mq/LEEME.md).
 
-## kafka/ — Kafka
+## kafka/ — no se usa
 
-3 Zookeeper + 3 brokers + Kafka UI en el puerto 8090. Tras levantar:
-
-```bash
-./crear-topicos.sh
-```
-
-Crea `appointments.events` y `audit.timeline` con las particiones, réplicas y políticas de
-retención que especifica el caso, más el tópico `.DLT` para mensajes fallidos.
-
-> `mq/` y `kafka/` quedan listos para la siguiente etapa del caso. En la EP1 ningún
-> servicio los consume todavía.
+Quedó de una exploración previa. La mensajería del sistema es RabbitMQ; esta carpeta no
+la levanta ningún compose y ningún servicio se conecta a ella.
 
 ## Credenciales
 
-Nunca se versionan. Cada carpeta usa un `.env` ignorado por git; `apps/.env.example` es la
+Nunca se versionan. `apps/.env` está ignorado por git; `apps/.env.example` es la
 plantilla con placeholders.
 
 ## Despliegue en AWS
 
-El paso a paso completo —EC2, Security Groups, API Gateway con JWT Authorizer y CORS— está
-en la guía `docs/DESPLIEGUE-AWS.md` del workspace.
+El paso a paso completo —EC2, Security Groups, API Gateway con JWT Authorizer y CORS—
+está en la guía `docs/DESPLIEGUE-AWS.md` del workspace.

@@ -1,11 +1,74 @@
-# EC2 "ec2-apps": BFF + microservicios de dominio.
+# Stack completo de VidaSalud: cluster RabbitMQ de 2 nodos + BFF + los cuatro
+# microservicios de dominio.
 #
 # Uso:   docker compose up -d --build
+#        ../mq/unir-cluster.sh        (una sola vez, tras el primer arranque)
 #
 # Los repositorios de codigo se clonan aparte. REPOS_PATH indica donde estan:
 #   - en tu PC, son hermanos de infra/   -> no hace falta definirlo
 #   - en la EC2, en /home/ec2-user       -> REPOS_PATH=/home/ec2-user en el .env
+#
+# Solo el BFF publica puerto al exterior (8080). Los microservicios usan
+# "expose": se ven entre contenedores y no desde internet. Los puertos de
+# RabbitMQ se publican para poder mostrar la consola en la presentacion.
 services:
+
+  # ---------------------------------------------------------------- mensajeria
+
+  rabbit1:
+    image: rabbitmq:3.13-management
+    container_name: rabbit1
+    hostname: rabbit1
+    environment:
+      # La cookie de Erlang tiene que ser identica en los dos nodos: es lo que
+      # les permite reconocerse como parte del mismo cluster.
+      RABBITMQ_ERLANG_COOKIE: ${ERLANG_COOKIE:-vidasalud-cookie}
+      RABBITMQ_DEFAULT_USER: ${RABBIT_USER:-admin}
+      RABBITMQ_DEFAULT_PASS: ${RABBIT_PASS:-admin}
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbit1-data:/var/lib/rabbitmq
+      - ../mq/definitions.json:/etc/rabbitmq/definitions.json:ro
+      - ../mq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+    restart: unless-stopped
+    networks: [vidasalud]
+
+  rabbit2:
+    image: rabbitmq:3.13-management
+    container_name: rabbit2
+    hostname: rabbit2
+    environment:
+      RABBITMQ_ERLANG_COOKIE: ${ERLANG_COOKIE:-vidasalud-cookie}
+      RABBITMQ_DEFAULT_USER: ${RABBIT_USER:-admin}
+      RABBITMQ_DEFAULT_PASS: ${RABBIT_PASS:-admin}
+    ports:
+      - "5673:5672"
+      - "15673:15672"
+    volumes:
+      - rabbit2-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+    depends_on:
+      - rabbit1
+    restart: unless-stopped
+    networks: [vidasalud]
+    # La union al cluster la hace ../mq/unir-cluster.sh, no el compose:
+    # "depends_on" asegura el orden de arranque del contenedor, no que Erlang
+    # este listo para aceptar la conexion del otro nodo.
+
+  # --------------------------------------------------------------------- borde
 
   bff:
     build: ${REPOS_PATH:-../..}/ms-vidasalud-bff
@@ -23,11 +86,17 @@ services:
       MS_CATALOG_URL: http://catalog:8082
       MS_REPORT_URL: http://appointments:8081
       MS_AUDIT_URL: http://appointments:8081
+      MS_NOTIFICATIONS_URL: http://notifications:8091
+      MS_MQ_URL: http://rabbit-admin:8090
     depends_on:
       - appointments
       - catalog
+      - notifications
+      - rabbit-admin
     restart: unless-stopped
     networks: [vidasalud]
+
+  # ------------------------------------------------------ servicios de dominio
 
   appointments:
     build: ${REPOS_PATH:-../..}/ms-vidasalud-appointments
@@ -40,6 +109,14 @@ services:
       DB_APPOINTMENTS_URL: ${DB_APPOINTMENTS_URL}
       DB_APPOINTMENTS_USER: ${DB_APPOINTMENTS_USER}
       DB_APPOINTMENTS_PASSWORD: ${DB_APPOINTMENTS_PASSWORD}
+      # Las dos direcciones del cluster: si rabbit1 no responde, el cliente
+      # usa rabbit2 sin que haya que tocar nada.
+      RABBIT_ADDRESSES: rabbit1:5672,rabbit2:5672
+      RABBIT_USER: ${RABBIT_USER:-admin}
+      RABBIT_PASS: ${RABBIT_PASS:-admin}
+    depends_on:
+      rabbit1:
+        condition: service_healthy
     restart: unless-stopped
     networks: [vidasalud]
 
@@ -54,8 +131,59 @@ services:
       DB_CATALOG_URL: ${DB_CATALOG_URL}
       DB_CATALOG_USER: ${DB_CATALOG_USER}
       DB_CATALOG_PASSWORD: ${DB_CATALOG_PASSWORD}
+      RABBIT_ADDRESSES: rabbit1:5672,rabbit2:5672
+      RABBIT_USER: ${RABBIT_USER:-admin}
+      RABBIT_PASS: ${RABBIT_PASS:-admin}
+    depends_on:
+      rabbit1:
+        condition: service_healthy
     restart: unless-stopped
     networks: [vidasalud]
+
+  # Consumidor de q.notificaciones.email. Sin base de datos: su trabajo es
+  # avisar al paciente, no guardar registros.
+  notifications:
+    build: ${REPOS_PATH:-../..}/ms-vidasalud-notifications
+    container_name: vidasalud-notifications
+    expose:
+      - "8091"
+    environment:
+      INTERNAL_KEY: ${INTERNAL_KEY}
+      RABBIT_ADDRESSES: rabbit1:5672,rabbit2:5672
+      RABBIT_USER: ${RABBIT_USER:-admin}
+      RABBIT_PASS: ${RABBIT_PASS:-admin}
+    depends_on:
+      rabbit1:
+        condition: service_healthy
+    restart: unless-stopped
+    networks: [vidasalud]
+
+  # ---------------------------------------------------- administrador del broker
+
+  # API REST para crear y borrar colas, exchanges y bindings. Habla con el
+  # broker por dos vias: AMQP (5672) para declarar y borrar, y la API de
+  # management (15672) para consultar lo que existe.
+  rabbit-admin:
+    build: ${REPOS_PATH:-../..}/ms-vidasalud-rabbit-admin
+    container_name: vidasalud-rabbit-admin
+    expose:
+      - "8090"
+    environment:
+      INTERNAL_KEY: ${INTERNAL_KEY}
+      RABBIT_HOST: rabbit1
+      RABBIT_PORT: 5672
+      RABBIT_MANAGEMENT_URL: http://rabbit1:15672
+      RABBIT_USER: ${RABBIT_USER:-admin}
+      RABBIT_PASS: ${RABBIT_PASS:-admin}
+    depends_on:
+      rabbit1:
+        condition: service_healthy
+    restart: unless-stopped
+    networks: [vidasalud]
+
+volumes:
+  rabbit1-data:
+  rabbit2-data:
 
 networks:
   vidasalud:
