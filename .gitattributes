@@ -1,0 +1,10 @@
+# Los scripts de shell SIEMPRE con final de linea LF.
+#
+# Sin esto, git en Windows los guarda con CRLF y al clonarlos en la EC2 Linux
+# fallan con "bad interpreter: /usr/bin/env bash^M", que es un error que cuesta
+# reconocer porque el archivo se ve bien.
+*.sh text eol=lf
+
+# El compose y las definiciones del broker tambien se leen dentro de Linux.
+*.yml text eol=lf
+*.json text eol=lf
