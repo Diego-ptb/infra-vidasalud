@@ -79,8 +79,13 @@ services:
       AZURE_TENANT_ID: ${AZURE_TENANT_ID}
       AZURE_API_CLIENT_ID: ${AZURE_API_CLIENT_ID}
       # Uno o varios origenes separados por coma.
-      FRONTEND_ORIGIN: ${FRONTEND_ORIGIN}
-      FRONTEND_ORIGINS: ${FRONTEND_ORIGINS:-}
+      #
+      # El respaldo se resuelve aqui y no en el application.yml del BFF: si
+      # Compose pasara FRONTEND_ORIGINS como cadena vacia, Spring la tomaria
+      # como definida, no caeria al valor por defecto y se quedaria sin ningun
+      # origen permitido. El sintoma es un 403 "Invalid CORS request" que
+      # parece un problema del API Gateway y no lo es.
+      FRONTEND_ORIGINS: ${FRONTEND_ORIGINS:-${FRONTEND_ORIGIN:-http://localhost:4200}}
       INTERNAL_KEY: ${INTERNAL_KEY}
       MS_APPOINTMENTS_URL: http://appointments:8081
       MS_CATALOG_URL: http://catalog:8082
