@@ -114,14 +114,9 @@ services:
       DB_APPOINTMENTS_URL: ${DB_APPOINTMENTS_URL}
       DB_APPOINTMENTS_USER: ${DB_APPOINTMENTS_USER}
       DB_APPOINTMENTS_PASSWORD: ${DB_APPOINTMENTS_PASSWORD}
-      # Las dos direcciones del cluster: si rabbit1 no responde, el cliente
-      # usa rabbit2 sin que haya que tocar nada.
-      RABBIT_ADDRESSES: rabbit1:5672,rabbit2:5672
-      RABBIT_USER: ${RABBIT_USER:-admin}
-      RABBIT_PASS: ${RABBIT_PASS:-admin}
-    depends_on:
-      rabbit1:
-        condition: service_healthy
+      # Este servicio no habla AMQP: anuncia los hechos por HTTP al
+      # microservicio de mensajeria, que es quien los convierte en mensajes.
+      MS_MQ_URL: http://rabbit-admin:8090
     restart: unless-stopped
     networks: [vidasalud]
 
@@ -136,17 +131,11 @@ services:
       DB_CATALOG_URL: ${DB_CATALOG_URL}
       DB_CATALOG_USER: ${DB_CATALOG_USER}
       DB_CATALOG_PASSWORD: ${DB_CATALOG_PASSWORD}
-      RABBIT_ADDRESSES: rabbit1:5672,rabbit2:5672
-      RABBIT_USER: ${RABBIT_USER:-admin}
-      RABBIT_PASS: ${RABBIT_PASS:-admin}
-    depends_on:
-      rabbit1:
-        condition: service_healthy
     restart: unless-stopped
     networks: [vidasalud]
 
-  # Consumidor de q.notificaciones.email. Sin base de datos: su trabajo es
-  # avisar al paciente, no guardar registros.
+  # Envia los avisos a los pacientes. Sin base de datos y sin AMQP: el envio
+  # lo dispara el microservicio de mensajeria por HTTP.
   notifications:
     build: ${REPOS_PATH:-../..}/ms-vidasalud-notifications
     container_name: vidasalud-notifications
@@ -154,20 +143,16 @@ services:
       - "8091"
     environment:
       INTERNAL_KEY: ${INTERNAL_KEY}
-      RABBIT_ADDRESSES: rabbit1:5672,rabbit2:5672
-      RABBIT_USER: ${RABBIT_USER:-admin}
-      RABBIT_PASS: ${RABBIT_PASS:-admin}
-    depends_on:
-      rabbit1:
-        condition: service_healthy
     restart: unless-stopped
     networks: [vidasalud]
 
-  # ---------------------------------------------------- administrador del broker
-
-  # API REST para crear y borrar colas, exchanges y bindings. Habla con el
-  # broker por dos vias: AMQP (5672) para declarar y borrar, y la API de
-  # management (15672) para consultar lo que existe.
+  # El UNICO servicio que habla AMQP. Se hace cargo de toda la mensajeria:
+  # declara la topologia, publica los eventos y consume las tres colas. Cuando
+  # consume un mensaje no ejecuta logica de negocio: llama por HTTP al duenio
+  # de esos datos, de modo que cada base sigue teniendo un unico duenio.
+  #
+  # Habla con el broker por dos vias: AMQP (5672) para declarar, publicar y
+  # consumir, y la API de management (15672) para consultar lo que existe.
   rabbit-admin:
     build: ${REPOS_PATH:-../..}/ms-vidasalud-rabbit-admin
     container_name: vidasalud-rabbit-admin
@@ -178,8 +163,13 @@ services:
       RABBIT_HOST: rabbit1
       RABBIT_PORT: 5672
       RABBIT_MANAGEMENT_URL: http://rabbit1:15672
+      RABBIT_ADDRESSES: rabbit1:5672,rabbit2:5672
       RABBIT_USER: ${RABBIT_USER:-admin}
       RABBIT_PASS: ${RABBIT_PASS:-admin}
+      # Destinos del trabajo que llega por las colas.
+      MS_APPOINTMENTS_URL: http://appointments:8081
+      MS_CATALOG_URL: http://catalog:8082
+      MS_NOTIFICATIONS_URL: http://notifications:8091
     depends_on:
       rabbit1:
         condition: service_healthy
